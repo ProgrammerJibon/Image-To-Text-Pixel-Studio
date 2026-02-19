@@ -13,7 +13,9 @@ const App = () => {
         total: 0,
         current: 0,
         x: 0,
-        y: 0
+        y: 0,
+        imgW: 0,
+        imgH: 0
     });
     const [showOutput, setShowOutput] = useState(false);
     const [previewUrl, setPreviewUrl] = useState(null);
@@ -23,6 +25,7 @@ const App = () => {
     const processingRef = useRef(false);
     const fileInputRef = useRef(null);
     const outputContentRef = useRef(null);
+    const scrollContainerRef = useRef(null);
     const rawHtmlStringRef = useRef('');
     const outputSettingsRef = useRef({ fontSize: 10, rawWidth: 100 });
     const toastTimeoutRef = useRef(null);
@@ -110,9 +113,11 @@ const App = () => {
 
         const { w, h } = calculateDimensions(image.width, image.height, settings.maxSize);
 
-        const fontSize = window.innerWidth / w;
+        const availableWidth = window.innerWidth >= 1152 ? 1152 - 64 : window.innerWidth - 64;
+        const calculatedFontSize = Math.max(1, availableWidth / (w * 0.6));
+
         outputSettingsRef.current = {
-            fontSize: Math.min(fontSize, 16),
+            fontSize: calculatedFontSize,
             rawWidth: w
         };
 
@@ -132,6 +137,36 @@ const App = () => {
             const imageData = ctx.getImageData(0, 0, w, h);
             const data = imageData.data;
 
+            if (settings.mode === 'ascii') {
+                const weights = [0, -1, 0, -1, 5, -1, 0, -1, 0];
+                const side = 3;
+                const halfSide = 1;
+                const src = new Uint8ClampedArray(data);
+
+                for (let y = 0; y < h; y++) {
+                    for (let x = 0; x < w; x++) {
+                        const dstOff = (y * w + x) * 4;
+                        let r = 0, g = 0, b = 0;
+                        for (let cy = 0; cy < side; cy++) {
+                            for (let cx = 0; cx < side; cx++) {
+                                const scy = y + cy - halfSide;
+                                const scx = x + cx - halfSide;
+                                if (scy >= 0 && scy < h && scx >= 0 && scx < w) {
+                                    const srcOff = (scy * w + scx) * 4;
+                                    const wt = weights[cy * side + cx];
+                                    r += src[srcOff] * wt;
+                                    g += src[srcOff + 1] * wt;
+                                    b += src[srcOff + 2] * wt;
+                                }
+                            }
+                        }
+                        data[dstOff] = Math.min(Math.max(r, 0), 255);
+                        data[dstOff + 1] = Math.min(Math.max(g, 0), 255);
+                        data[dstOff + 2] = Math.min(Math.max(b, 0), 255);
+                    }
+                }
+            }
+
             rawHtmlStringRef.current = '';
 
             setProcessing({
@@ -140,22 +175,18 @@ const App = () => {
                 total: w * h,
                 current: 0,
                 x: 0,
-                y: 0
+                y: 0,
+                imgW: w,
+                imgH: h
             });
+
+            const toHex = (c) => c.toString(16).padStart(2, '0');
 
             const processPixels = async () => {
                 for (let y = 0; y < h; y++) {
                     if (!processingRef.current) break;
 
-                    const rowDiv = document.createElement('div');
-                    rowDiv.style.display = 'flex';
-                    rowDiv.style.lineHeight = '0.6rem';
-
-                    if (outputContentRef.current) {
-                        outputContentRef.current.appendChild(rowDiv);
-                    }
-
-                    rawHtmlStringRef.current += `<div style="display: flex; ">`;
+                    let rowHtml = '';
 
                     for (let x = 0; x < w; x++) {
                         if (!processingRef.current) break;
@@ -167,31 +198,25 @@ const App = () => {
                         const gray = 0.299 * r + 0.587 * g + 0.114 * b;
 
                         let char = '#';
-                        let color = `rgb(${r},${g},${b})`;
+                        let hexColor = `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 
                         if (settings.mode === 'grayscale') {
-                            color = `rgb(${gray},${gray},${gray})`;
+                            const gHex = toHex(Math.round(gray));
+                            hexColor = `#${gHex}${gHex}${gHex}`;
                         } else if (settings.mode === 'ascii') {
                             const chars = ['#', '%', '0', '*', '`', ' '];
                             const index = Math.floor((gray / 255) * 5);
                             char = chars[index];
-                            color = 'currentColor';
                         }
 
-                        if (char === ' ') char = '&nbsp;';
-
-                        const span = document.createElement('span');
-                        span.style.color = color;
-                        span.style.width = '0.6em';
-                        span.style.display = 'inline-block';
-                        span.style.textAlign = 'center';
-                        span.innerHTML = char;
-
-                        rowDiv.appendChild(span);
-
-                        rawHtmlStringRef.current += `<span style="color: ${color}; width: 0.6em; display: inline-block; text-align: center;">${char}</span>`;
+                        if (settings.mode === 'ascii') {
+                            rowHtml += char;
+                        } else {
+                            rowHtml += `<span style="color: ${hexColor}">${char}</span>`;
+                        }
 
                         const processed = y * w + x + 1;
+
                         setProcessing(prev => ({
                             ...prev,
                             progress: Math.round((processed / (w * h)) * 100),
@@ -199,15 +224,25 @@ const App = () => {
                             x: x,
                             y: y
                         }));
-
-                        await new Promise(resolve => setTimeout(resolve, 0));
                     }
 
-                    rawHtmlStringRef.current += `</div>`;
+                    if (processingRef.current) {
+                        rowHtml += '\n';
+                        rawHtmlStringRef.current += rowHtml;
+                        if (outputContentRef.current) {
+                            outputContentRef.current.insertAdjacentHTML('beforeend', rowHtml);
+                        }
+
+                        if (scrollContainerRef.current) {
+                            scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+                        }
+
+                        await new Promise(resolve => setTimeout(resolve, 1));
+                    }
                 }
 
                 if (processingRef.current) {
-                    setProcessing(prev => ({ ...prev, active: false }));
+                    setProcessing(prev => ({ ...prev, active: false, progress: 100 }));
                     processingRef.current = false;
                 }
             };
@@ -414,7 +449,7 @@ const App = () => {
                 <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-40 flex items-center justify-center p-4 sm:p-8">
                     <div className="bg-white w-full max-w-6xl h-[90vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden relative">
 
-                        <div className="p-4 border-b border-slate-200 flex justify-between items-center bg-white z-10">
+                        <div className="p-4 border-b border-slate-200 flex justify-between items-center bg-white z-10 shrink-0">
                             <h3 className="font-bold text-slate-700">Result</h3>
                             <div className="flex gap-2">
                                 <button
@@ -438,16 +473,20 @@ const App = () => {
                             </div>
                         </div>
 
-                        <div className="flex-1 overflow-auto bg-white p-4 flex items-center justify-center text-black">
+                        <div
+                            ref={scrollContainerRef}
+                            className="flex-1 overflow-auto bg-white p-4 flex items-start justify-center text-black"
+                        >
                             <div
                                 ref={outputContentRef}
-                                className="font-mono whitespace-pre select-text origin-top"
                                 style={{
                                     fontFamily: "'Courier New', Courier, monospace",
                                     backgroundColor: '#ffffff',
                                     color: '#000000',
-                                    fontSize: `${Math.max(outputSettingsRef.current.fontSize, 2)}px`,
-                                    lineHeight: `${Math.max(outputSettingsRef.current.fontSize, 2)}px`
+                                    fontSize: `${outputSettingsRef.current.fontSize}px`,
+                                    lineHeight: '0.6em',
+                                    whiteSpace: 'pre',
+                                    textAlign: 'left'
                                 }}
                             />
                         </div>
@@ -468,7 +507,7 @@ const App = () => {
                                     <div className="grid grid-cols-2 gap-4 text-xs text-slate-500 font-mono text-left bg-slate-50 p-3 rounded-lg">
                                         <div>Progress: <span className="text-slate-800">{processing.progress}%</span></div>
                                         <div>Converted: <span className="text-slate-800">{processing.current}</span></div>
-                                        <div>Total Px: <span className="text-slate-800">{processing.total}</span></div>
+                                        <div>Total: <span className="text-slate-800">{processing.imgW} x {processing.imgH}</span></div>
                                         <div>Coord: <span className="text-slate-800">{processing.x}, {processing.y}</span></div>
                                     </div>
 
